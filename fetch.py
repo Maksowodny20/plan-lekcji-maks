@@ -1,82 +1,223 @@
-"""Bezpieczna publikacja samego planu lekcji z Librusa do statycznej strony.
-
-Login i hasło: wyłącznie zmienne środowiskowe, nigdy w plikach strony.
-"""
-
+"""Publish only an explicit anonymous schema. Never serialize raw Librus data."""
 import asyncio
 import json
+import logging
 import os
-from datetime import datetime, timedelta
+import re
+import sys
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 from librus_synergia import Librus
+from librus_synergia.exceptions import (
+    LibrusAccountActionRequiredError, LibrusAuthError, LibrusCaptchaRequiredError,
+    LibrusConnectionError, LibrusInvalidCredentialsError,
+)
 
 TZ = ZoneInfo("Europe/Warsaw")
 SITE_DIR = Path(__file__).resolve().parent / "site"
+# Fixed public labels: arbitrary subject names may contain personal information.
+SUBJECTS = {n.casefold(): n for n in (
+    "Język polski", "Język angielski", "Język niemiecki", "Język hiszpański",
+    "Język francuski", "Język rosyjski", "Język włoski", "Matematyka", "Historia",
+    "Geografia", "Biologia", "Chemia", "Fizyka", "Informatyka", "Technika",
+    "Muzyka", "Plastyka", "Wychowanie fizyczne", "Godzina wychowawcza",
+    "Zajęcia z wychowawcą", "Edukacja dla bezpieczeństwa", "Wiedza o społeczeństwie",
+    "Biznes i zarządzanie", "Podstawy przedsiębiorczości", "Edukacja obywatelska",
+    "Edukacja zdrowotna", "Przyroda", "Zajęcia praktyczne", "Zajęcia zawodowe",
+    "Zajęcia", "Etyka", "Religia", "Doradztwo zawodowe", "Edukacja wczesnoszkolna",
+)}
+SUBJECTS.update({"wf": "Wychowanie fizyczne", "w-f": "Wychowanie fizyczne",
+                 "j. polski": "Język polski", "j. angielski": "Język angielski",
+                 "j. niemiecki": "Język niemiecki"})
+ERRORS = {
+    "missing_secrets": "Brak sekretów LIBRUS_LOGIN lub LIBRUS_PASSWORD w Actions.",
+    "captcha": "Librus wymaga weryfikacji logowania (CAPTCHA).",
+    "credentials": "Librus odrzucił dane logowania. Sprawdź sekrety w GitHub.",
+    "account": "Librus wymaga działania na koncie w swoim portalu.",
+    "auth": "Nie udało się uwierzytelnić w Librusie.",
+    "timeout": "Przekroczono limit czasu synchronizacji (120 s).",
+    "connection": "Librus chwilowo niedostępny. Kolejna próba zgodnie z harmonogramem.",
+    "invalid_data": "Nieoczekiwany format planu. Wstrzymano publikację danych.",
+    "unexpected": "Synchronizacja nie powiodła się. Sprawdź etap w Actions.",
+}
 
 
-def lookup(table, key, fallback=""):
-    return str(table.get(str(key), fallback)) if key is not None else fallback
+def subject_name(value):
+    return SUBJECTS.get(" ".join(str(value).split()).casefold(), "Zajęcia")
 
 
 def clean_time(value):
-    return str(value)[:5] if value else ""
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?", str(value))
+    if not match:
+        raise ValueError("invalid time")
+    return f"{match[1]}:{match[2]}"
+
+
+def public_lesson(lesson, subjects):
+    number = lesson.lesson_no
+    if number is not None and (type(number) is not int or not 0 <= number <= 30):
+        raise ValueError("invalid lesson number")
+    start, end = clean_time(lesson.hour_from), clean_time(lesson.hour_to)
+    if start >= end:
+        raise ValueError("invalid lesson hours")
+    lookup = lambda key: subject_name(subjects.get(str(key), "Zajęcia"))
+    return {"number": number, "start": start, "end": end,
+            "subject": lookup(lesson.subject_id), "cancelled": bool(lesson.is_canceled),
+            "substitution": bool(lesson.is_substitution),
+            "original_subject": lookup(lesson.original.subject_id) if lesson.original else None}
+
+
+def validate_payload(payload):
+    """Gate for generated JSON and the previous public snapshot."""
+    if set(payload) != {"schema_version", "updated_at", "timezone", "days"}:
+        raise ValueError("invalid payload keys")
+    if payload["schema_version"] != 1 or payload["timezone"] != "Europe/Warsaw":
+        raise ValueError("invalid schema")
+    if datetime.fromisoformat(payload["updated_at"]).utcoffset() is None:
+        raise ValueError("missing timezone")
+    if not isinstance(payload["days"], dict) or not 1 <= len(payload["days"]) <= 2:
+        raise ValueError("invalid day count")
+    for day, lessons in payload["days"].items():
+        date.fromisoformat(day)
+        if not isinstance(lessons, list) or len(lessons) > 80:
+            raise ValueError("invalid lessons")
+        for row in lessons:
+            if set(row) != {"number", "start", "end", "subject", "cancelled", "substitution", "original_subject"}:
+                raise ValueError("private or unknown field")
+            n = row["number"]
+            if n is not None and (type(n) is not int or not 0 <= n <= 30):
+                raise ValueError("invalid number")
+            if clean_time(row["start"]) != row["start"] or clean_time(row["end"]) != row["end"] or row["start"] >= row["end"]:
+                raise ValueError("invalid times")
+            if row["subject"] not in SUBJECTS.values() or (row["original_subject"] is not None and row["original_subject"] not in SUBJECTS.values()):
+                raise ValueError("unapproved public label")
+            if any(type(row[k]) is not bool for k in ("cancelled", "substitution")):
+                raise ValueError("invalid status")
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+async def restore_previous(session):
+    # Only an already-public snapshot. No credentials, cookies or sessions stored.
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repo):
+        return
+    owner, name = repo.split("/")
+    try:
+        async with session.get(f"https://{owner}.github.io/{name}/plan.json", timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status != 200:
+                return
+            body = await response.content.read(150001)
+            if len(body) > 150000:
+                return
+            previous = json.loads(body)
+            validate_payload(previous)
+            today = datetime.now(TZ).date()
+            previous["days"] = {d: rows for d, rows in previous["days"].items() if today <= date.fromisoformat(d) <= today + timedelta(days=1)}
+            if previous["days"]:
+                write_json(SITE_DIR / "plan.json", previous)
+                print("Zachowano ostatni poprawny publiczny plan.", flush=True)
+    except (aiohttp.ClientError, TimeoutError, ValueError, TypeError, KeyError):
+        pass
+
+
+async def diagnose_login_response(session, context, params):
+    """Only booleans about CAPTCHA detection, never URL paths, bodies or cookies."""
+    response = params.response
+    if response.url.host not in {"synergia.librus.pl", "api.librus.pl"}:
+        return
+    if "html" not in response.headers.get("Content-Type", ""):
+        return
+    body = await response.text(errors="replace")
+    if "captcha" not in body.casefold():
+        return
+    without_scripts = re.sub(r"<script\b[^>]*>.*?</script>", "", body, flags=re.I | re.S)
+    active = bool(re.search(r"<(?:div|iframe|input|form)\b[^>]*(?:g-recaptcha|h-captcha|recaptcha|captcha)", without_scripts, re.I))
+    has_session = any(cookie.key == "oauth_token" for cookie in session.cookie_jar)
+    print(f"Diagnostyka CAPTCHA: HTTP={response.status}, element_wyzwania={active}, znacznik_poza_skryptami={'captcha' in without_scripts.casefold()}, cookie_sesji_obecne={has_session}.", flush=True)
+
+
+async def collect(username, password):
+    today = datetime.now(TZ).date()
+    wanted = {today, today + timedelta(days=1)}
+    weeks = sorted({d - timedelta(days=d.weekday()) for d in wanted})
+    data = {}
+    trace = aiohttp.TraceConfig()
+    trace.on_request_end.append(diagnose_login_response)
+    async with aiohttp.ClientSession(trace_configs=[trace]) as session, Librus(username, password, session=session, cache_reference_data=True,
+                      request_timeout=aiohttp.ClientTimeout(total=20, connect=8)) as librus:
+        print("Etap: logowanie do Librusa.", flush=True)
+        await librus.login()
+        print("Etap: słownik przedmiotów.", flush=True)
+        subjects = {str(k): v for k, v in (await librus.subjects()).items()}
+        for week in weeks:
+            print("Etap: pobieranie tygodnia planu.", flush=True)
+            fetched = await librus.timetable(week)
+            for day, entries in fetched.items():
+                if day in wanted:
+                    data[day.isoformat()] = sorted(
+                        (public_lesson(lesson, subjects) for lesson in entries),
+                        key=lambda row: (row["start"], row["number"] if row["number"] is not None else 99))
+            # Omitted weekend days are empty only for a published week.
+            if fetched:
+                for day in wanted:
+                    if day.weekday() >= 5 and week <= day <= week + timedelta(days=6):
+                        data.setdefault(day.isoformat(), [])
+    payload = {"schema_version": 1, "updated_at": datetime.now(TZ).isoformat(timespec="seconds"),
+               "timezone": "Europe/Warsaw", "days": data}
+    validate_payload(payload)
+    return payload
 
 
 async def main():
-    username = os.environ.get("LIBRUS_LOGIN")
-    password = os.environ.get("LIBRUS_PASSWORD")    
-    print("Login dostępny:", bool(username))
-    print("Hasło dostępne:", bool(password))
-    if not username or not password:
-        raise RuntimeError("Skonfiguruj sekrety LIBRUS_LOGIN i LIBRUS_PASSWORD")
-
-    now = datetime.now(TZ)
-    monday = now.date() - timedelta(days=now.weekday())
-    show_rooms = os.environ.get("SHOW_ROOMS", "false").lower() == "true"
-    data = {}
-
-    async with Librus(username, password, cache_reference_data=True) as librus:
-        subjects = {str(k): str(v) for k, v in (await librus.subjects()).items()}
-        classrooms = (
-            {str(k): str(v) for k, v in (await librus.classrooms()).items()}
-            if show_rooms else {}
-        )
-
-        for week in (monday, monday + timedelta(days=7)):
-            fetched = await librus.timetable(week)
-            for day, entries in fetched.items():
-                day_key = day.isoformat() if hasattr(day, "isoformat") else str(day)[:10]
-                lessons = []
-                for lesson in entries:
-                    original_subject = None
-                    if lesson.original is not None:
-                        original_subject = lookup(subjects, lesson.original.subject_id, "")
-                    lessons.append({
-                        "number": lesson.lesson_no,
-                        "start": clean_time(lesson.hour_from),
-                        "end": clean_time(lesson.hour_to),
-                        "subject": lookup(subjects, lesson.subject_id, "Nieznany przedmiot"),
-                        "room": lookup(classrooms, lesson.classroom_id, "") if show_rooms else "",
-                        "cancelled": bool(lesson.is_canceled),
-                        "substitution": bool(lesson.is_substitution),
-                        "original_subject": original_subject,
-                    })
-                lessons.sort(key=lambda it: (it["start"] or "99:99", it["number"] or 999))
-                data[day_key] = lessons
-
-    payload = {
-        "updated_at": now.isoformat(timespec="minutes"),
-        "timezone": "Europe/Warsaw",
-        "days": data,
-    }
-    SITE_DIR.mkdir(parents=True, exist_ok=True)
-    (SITE_DIR / "plan.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(f"Zapisano plan: {len(data)} dni, aktualizacja {now:%Y-%m-%d %H:%M}")
+    # Library exceptions may embed private HTTP bodies: never print them.
+    logging.disable(logging.CRITICAL)
+    plan_path = SITE_DIR / "plan.json"
+    plan_path.unlink(missing_ok=True)
+    async with aiohttp.ClientSession() as session:
+        await restore_previous(session)
+    code = None
+    try:
+        username, password = os.environ.get("LIBRUS_LOGIN"), os.environ.get("LIBRUS_PASSWORD")
+        print(f"Sekrety: LIBRUS_LOGIN={'dostępny' if username else 'brak'}, LIBRUS_PASSWORD={'dostępny' if password else 'brak'}.", flush=True)
+        if not username or not password:
+            code = "missing_secrets"
+        else:
+            async with asyncio.timeout(120):
+                payload = await collect(username, password)
+            write_json(plan_path, payload)
+            print(f"Plan zweryfikowany: {len(payload['days'])} dni, {sum(map(len, payload['days'].values()))} lekcji.", flush=True)
+    except LibrusCaptchaRequiredError:
+        code = "captcha"
+    except LibrusInvalidCredentialsError:
+        code = "credentials"
+    except LibrusAccountActionRequiredError:
+        code = "account"
+    except LibrusAuthError:
+        code = "auth"
+    except TimeoutError:
+        code = "timeout"
+    except LibrusConnectionError:
+        code = "connection"
+    except (ValueError, TypeError, KeyError, AttributeError):
+        code = "invalid_data"
+    except Exception:
+        code = "unexpected"
+    write_json(SITE_DIR / "status.json", {"ok": code is None,
+        "checked_at": datetime.now(TZ).isoformat(timespec="seconds"), "error": code})
+    if code:
+        print(f"::error::{ERRORS[code]} Kod: {code}. Dane prywatne nie są logowane.", flush=True)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

@@ -1,37 +1,39 @@
-# Librus → plan lekcji na Carrd Pro
+# Automatyczny plan Librus → Carrd
 
-Gotowy widżet osadzany w Carrd. Jest wyświetlany **wewnątrz** Twojej strony Carrd (przez IFRAME), ale bezpieczna synchronizacja z Librusem odbywa się w GitHub Actions. Sam Carrd nie przechowuje loginu ani hasła.
+Plan: https://maksowodny20.github.io/plan-lekcji-maks/
 
-**Wymagania:** konto Librus Synergia, Carrd Pro Standard/Plus, darmowe konto GitHub. Nie musisz trzymać komputera włączonego.
+Workflow `.github/workflows/plan.yml` uruchamia się na `main`, ręcznie i o minutach 7 oraz 37 każdej godziny UTC, bez włączonego komputera. GitHub może opóźniać harmonogram oraz wyłączyć go po 60 dniach bez aktywności publicznego repozytorium.
 
-## Konfiguracja
+Sekrety repozytorium: `LIBRUS_LOGIN`, `LIBRUS_PASSWORD`. Skrypt sprawdza tylko ich obecność. Pages: Source = GitHub Actions. Python 3.12+, `librus-synergia==0.3.33`; zweryfikowane API `login()`, `subjects()`, `timetable(date)`, `LessonData`, `OriginalLessonData`.
 
-1. Załóż na https://github.com/new repozytorium o nazwie np. `moj-plan-librus` (najprościej **Public**). Gałąź główna: `main`.
-2. Wgraj **zawartość rozpakowanego folderu**, wraz z ukrytym katalogiem `.github` (czyli `fetch.py`, `site/index.html`, `.github/workflows/plan.yml`, `README.md`). Najłatwiej zrobić to z GitHub Desktop lub przez `git`.
-3. W repozytorium przejdź do **Settings → Secrets and variables → Actions → New repository secret**. Dodaj dwa sekrety: `LIBRUS_LOGIN` i `LIBRUS_PASSWORD`. Wartości wpisz **wyłącznie tam**. Nie wysyłaj ich do czatu, nie wpisuj do kodu ani nie publikuj.
-4. **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-5. **Actions → Odśwież plan z Librusa → Run workflow**. Po sukcesie strona będzie pod adresem zbliżonym do `https://TWOJ-LOGIN.github.io/moj-plan-librus/`.
-6. W edytorze Carrd: **+ → Embed → Type: IFRAME → URL**: adres z kroku 5. Wybierz szerokość 100%, wysokość np. **750 px**, zapisz i opublikuj stronę. W razie potrzeby dostosuj wysokość, by uniknąć przewijania wewnątrz ramki.
+Plan pokazuje dzisiaj i jutro w Europe/Warsaw: godziny, numer lekcji, przedmiot, zastępstwa i odwołania. Pobierany jest tylko wymagany tydzień albo dwa przy granicy tygodni. Nieznany dzień różni się od dnia bez lekcji.
 
-## Wariant zamiast IFRAME
+## Bezpieczeństwo i niezawodność
 
-Możesz osadzić w Carrd element `Embed → Code → Inline` z kodem `<iframe src="https://TWOJ-LOGIN.github.io/moj-plan-librus/" title="Plan lekcji" style="border:0;width:100%;height:750px;border-radius:18px;"></iframe>`.
+- Publiczne pliki wybierane jawnie: `index.html`, `plan.json`, `status.json`, `.nojekyll`.
+- Bez nazwisk, identyfikatorów, sal i komentarzy. Nazwy przedmiotów pochodzą z zamkniętego słownika; nieznane nazwy zmieniane są na „Zajęcia”.
+- Walidacja formatu przed publikacją. Zapis atomowy. Zero surowych obiektów biblioteki.
+- Timeout żądania 20 s, połączenia 8 s, synchronizacji 120 s, jobów 6/5 minut. Bez automatycznego ponawiania CAPTCHA lub odrzuconych haseł.
+- Przy błędzie zostaje poprzedni publiczny, zweryfikowany plan dla nadal aktualnych dat i widoczny komunikat. Workflow pozostaje czerwony, nawet jeśli udało się opublikować stronę ze stanem błędu.
+- Bez logowania treści wyjątków lub odpowiedzi HTTP. Diagnostyka CAPTCHA pokazuje wyłącznie HTTP i wartości logiczne, bez ciał odpowiedzi, adresów przekierowań lub cookies. Nie przechowujemy danych sesji w plikach, cache ani artefaktach.
+- Widżet odświeża dane co 5 minut i po powrocie do karty. Po 90 minutach oznacza dane jako nieaktualne.
 
-## Automatyzacja
+## Carrd Pro Standard lub wyższy
 
-GitHub Actions uruchamia pobieranie co około 30 minut od 05:07 do 20:37 UTC (plus na żądanie). Harmonogram GitHub może się opóźniać, a Librus może zmienić sposób logowania. Przy błędzie poprzednio opublikowana wersja pozostaje widoczna i może być nieaktualna — sprawdź datę aktualizacji widżetu.
+Embed → Type: IFRAME → URL: `https://maksowodny20.github.io/plan-lekcji-maks/`, Width: 100%, Height: 850 px, Aspect Ratio: Ignore.
 
-Widżet pokazuje dzień dzisiejszy, jutrzejszy i następne 7 dni oraz status lekcji odwołanych/zastępstw. Bezpośrednio z Librusa pobiera dwa tygodnie planu. **Nie pobiera ocen, wiadomości ani danych osobowych** do publicznej strony.
+Albo Embed → Code → Inline:
 
-## Prywatność
+```html
+<iframe src="https://maksowodny20.github.io/plan-lekcji-maks/" title="Plan lekcji — dzisiaj i jutro" width="100%" height="850" loading="lazy" referrerpolicy="no-referrer" style="display:block;border:0;border-radius:18px;width:100%;max-width:720px;margin:auto;"></iframe>
+```
 
-Strona GitHub Pages jest publiczna. Każdy, kto zna jej adres lub widzi Twoją witrynę Carrd, może zobaczyć opublikowane lekcje. **Sale są domyślnie ukryte**, tak samo jak imiona nauczycieli. Jeśli świadomie chcesz ujawniać numery sal, w `.github/workflows/plan.yml` zmień `SHOW_ROOMS: 'false'` na `'true'`.
+Ramka działa na opublikowanej stronie; edytor może pokazać placeholder.
 
-### Problemy
+## Testy bez logowania
 
-- `LIBRUS_LOGIN` lub `LIBRUS_PASSWORD` missing: sprawdź repo secrets.
-- Błąd logowania / CAPTCHA: nieoficjalna biblioteka zależy od zmian w Librusie, więc może potrzebować aktualizacji albo zmiany hostingu.
-- Brak nowego planu: GitHub Actions czasem opóźnia harmonogram; uruchom workflow ręcznie, sprawdź status.
-- Nic nie widać w edytorze Carrd: element IFRAME wyświetla się na opublikowanej stronie, nie zawsze w edytorze.
+`python -m pip install -r requirements.txt`
 
-Źródła: https://carrd.com/docs/building/embedding-iframes oraz https://pypi.org/project/librus-synergia/
+`python -m unittest -v`
+
+Źródła: https://pypi.org/project/librus-synergia/0.3.33/ oraz https://carrd.com/docs/building/embedding-iframes

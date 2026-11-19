@@ -5,10 +5,10 @@ Session values stay in memory and are never included in public output.
 """
 import asyncio
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urljoin
 
 from librus_synergia.client import LibrusSessionData
-from librus_synergia.const import PERSISTED_COOKIE_NAMES
+from librus_synergia.const import PERSISTED_COOKIE_NAMES, SYNERGIA_PORTAL_LOGIN_URL
 from librus_synergia.exceptions import (
     LibrusAccountActionRequiredError, LibrusAuthError, LibrusCaptchaRequiredError,
     LibrusConnectionError,
@@ -39,46 +39,50 @@ def is_login_response(response):
             and target.path == "/OAuth/Authorization" and response.request.method == "POST")
 
 
+def is_authorization_url(url):
+    try:
+        target = urlsplit(url)
+        return (target.scheme == "https" and target.hostname == "api.librus.pl"
+                and target.port in (None, 443) and target.username is None
+                and target.password is None and target.path == "/OAuth/Authorization")
+    except ValueError:
+        return False
+
+
 async def browser_session(username, password):
-    from playwright.async_api import async_playwright, Error as BrowserError, TimeoutError as BrowserTimeoutError
+    from playwright.async_api import async_playwright, Error as BrowserError
 
     print("Etap: zwykły formularz logowania w Chromium na serwerze.", flush=True)
     phase = "start"
     try:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
+            browser = await playwright.chromium.launch(channel="chrome", headless=True)
             try:
                 context = await browser.new_context(accept_downloads=False)
                 page = await context.new_page()
                 page.set_default_timeout(12000)
-                # The current portal is a client-side app: its Synergia link
-                # creates an iframe with layout_version=2. Navigating directly
-                # to the legacy URL returns to the home page in a real browser.
-                phase = "portal_loading"
-                await page.goto("https://portal.librus.pl/rodzina", wait_until="domcontentloaded", timeout=25000)
+                # Bootstrap the documented OAuth entry point as an API request.
+                # context.request shares cookies with the real Chrome page.
+                # This avoids the unrelated portal home-page SPA redirect.
+                phase = "oauth_bootstrap"
+                bootstrap = await context.request.get(SYNERGIA_PORTAL_LOGIN_URL,
+                    max_redirects=0, timeout=20000)
+                print(f"Chrome: inicjalizacja OAuth HTTP={bootstrap.status}.", flush=True)
+                location = bootstrap.headers.get("location")
+                if not location:
+                    raise LibrusConnectionError("OAuth entry point did not redirect")
+                authorization_url = urljoin(SYNERGIA_PORTAL_LOGIN_URL, location)
+                if not is_authorization_url(authorization_url):
+                    raise LibrusAuthError("Unexpected OAuth destination")
+                await bootstrap.dispose()
+                phase = "authorization_page"
+                response = await page.goto(authorization_url, wait_until="domcontentloaded", timeout=25000)
                 target = urlsplit(page.url)
-                allowed = {"api.librus.pl", "synergia.librus.pl", "portal.librus.pl"}
+                allowed = {"api.librus.pl", "synergia.librus.pl"}
                 origin = target.hostname if target.hostname in allowed else "other"
-                print(f"Chromium: dokument logowania gotowy, host={origin}.", flush=True)
+                print(f"Chromium: dokument logowania gotowy, host={origin}, HTTP={response.status if response else 0}.", flush=True)
                 if target.scheme != "https" or target.hostname not in allowed:
                     raise LibrusAuthError("Unexpected login origin")
-                phase = "privacy_options"
-                try:
-                    advanced = page.get_by_role("button", name="Ustawienia zaawansowane", exact=True)
-                    await advanced.wait_for(state="visible", timeout=12000)
-                except BrowserTimeoutError:
-                    print("Chromium: brak widocznego panelu cookies; przejście do menu.", flush=True)
-                else:
-                    await advanced.click()
-                    phase = "privacy_save"
-                    await page.get_by_role("button", name="Zapisz", exact=True).click()
-                    print("Chromium: wybrano wyłącznie niezbędne cookies portalu.", flush=True)
-                phase = "school_menu"
-                print(f"Chromium: przycisk menu obecny={bool(await page.get_by_role('button', name='LIBRUS Synergia', exact=True).count())}.", flush=True)
-                await page.get_by_role("button", name="LIBRUS Synergia", exact=True).click()
-                phase = "school_link"
-                await page.locator('a[href$="/rodzina/synergia/loguj"]').click()
-                print("Chromium: otwarto szkolny formularz z menu portalu.", flush=True)
                 frame = None
                 phase = "school_frame"
                 deadline = time.monotonic() + 15

@@ -2,11 +2,16 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from browser_auth import is_login_response, session_from_cookies
+from browser_auth import is_login_response, is_authorization_url, session_from_cookies
 from librus_synergia.exceptions import LibrusAuthError
 
 
 class BrowserPrivacyTests(unittest.TestCase):
+    def test_bootstrap_cannot_redirect_credentials_to_another_origin(self):
+        self.assertTrue(is_authorization_url("https://api.librus.pl/OAuth/Authorization?state=PRIVATE"))
+        for url in ("http://api.librus.pl/OAuth/Authorization", "https://api.librus.pl.evil.example/OAuth/Authorization", "https://user@api.librus.pl/OAuth/Authorization", "https://api.librus.pl:444/OAuth/Authorization", "https://api.librus.pl/other"):
+            self.assertFalse(is_authorization_url(url))
+
     def test_only_librus_authentication_cookies_are_transferred(self):
         cookies = [
             {"name": "oauth_token", "domain": ".synergia.librus.pl", "value": "PRIVATE_SESSION", "path": "/", "expires": -1},

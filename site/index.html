@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
+<meta name="robots" content="noindex,nofollow">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'">
 <title>Plan lekcji</title>
 <style>
 :root { color-scheme:dark; --bg:#10151e; --panel:#1a2330; --ink:#ecf3fc; --muted:#a7b8c8; --stroke:#334153; --accent:#79c6f5; --red:#ffb0ae; --yellow:#ffd890; }
@@ -21,18 +23,18 @@ button[aria-pressed="true"]{background:var(--accent);color:#0c1b2c;border-color:
 @media(max-width:480px){.frame{padding:13px}.lesson{grid-template-columns:30px 1fr;gap:8px}.room{grid-column:2;justify-self:start}.number{font-size:16px}h1{font-size:21px}}
 </style>
 </head>
-<body><div id="app"><div class="frame"><h1>Plan lekcji</h1><p id="updated" class="sub">Wczytywanie…</p><nav id="nav" aria-label="Wybierz zakres planu"></nav><div id="lessons" aria-live="polite">Pobieranie planu…</div></div></div>
+<body><div id="app"><div class="frame"><h1>Plan lekcji</h1><p id="updated" class="sub">Wczytywanie…</p><p id="health" class="sub" role="status"></p><nav id="nav" aria-label="Wybierz zakres planu"></nav><div id="lessons" aria-live="polite">Pobieranie planu…</div></div></div>
 <script>
 const nav=document.getElementById('nav'), out=document.getElementById('lessons'), updated=document.getElementById('updated');
 const dayNames=['niedziela','poniedziałek','wtorek','środa','czwartek','piątek','sobota'];
-let plan=null, view='today';
+let plan=null, view='today', health=document.getElementById('health');
 function warsawToday(){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Warsaw',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));return `${p.year}-${p.month}-${p.day}`;}
 function shiftDate(day,n){const d=new Date(day+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
 function titleFor(day){const date=new Date(day+'T12:00:00Z');return dayNames[date.getUTCDay()]+', '+date.toLocaleDateString('pl-PL',{day:'numeric',month:'long',timeZone:'UTC'});}
 function make(tag,cls,txt){const x=document.createElement(tag);if(cls)x.className=cls;if(txt!==undefined)x.textContent=txt;return x;}
 function render(){
   if(!plan)return;nav.replaceChildren();out.replaceChildren();
-  for(const [key,label] of [['today','Dzisiaj'],['tomorrow','Jutro'],['week','7 dni']]){const btn=make('button','',label);btn.type='button';btn.setAttribute('aria-pressed',String(view===key));btn.addEventListener('click',()=>{view=key;render()});nav.append(btn);}
+  for(const [key,label] of [['today','Dzisiaj'],['tomorrow','Jutro']]){const btn=make('button','',label);btn.type='button';btn.setAttribute('aria-pressed',String(view===key));btn.addEventListener('click',()=>{view=key;render()});nav.append(btn);}
   const today=warsawToday(); const dates=view==='today'?[today]:view==='tomorrow'?[shiftDate(today,1)]:Array.from({length:7},(_,i)=>shiftDate(today,i));
   for(const day of dates){
     out.append(make('div','dayhead',titleFor(day)));
@@ -52,7 +54,24 @@ function render(){
     }
   }
 }
-(async()=>{try{const response=await fetch('./plan.json?d='+Date.now(),{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const value=await response.json();if(!value.days||typeof value.days!=='object')throw new Error('Niepoprawne dane');plan=value;updated.textContent='Źródło: Librus Synergia · Ostatnia aktualizacja: '+new Date(value.updated_at).toLocaleString('pl-PL',{dateStyle:'short',timeStyle:'short',timeZone:'Europe/Warsaw'});render();}catch(err){updated.textContent='Brak aktualnych danych';out.replaceChildren(make('div','empty error','Nie udało się pobrać planu. Sprawdź konfigurację synchronizacji.'));}})();
+const messages={captcha:'Synchronizacja zatrzymana: Librus wymaga weryfikacji logowania.',credentials:'Synchronizacja zatrzymana: błąd logowania do Librusa.',account:'Librus wymaga działania na koncie.',missing_secrets:'Synchronizacja wymaga konfiguracji.',timeout:'Librus nie odpowiedział w wymaganym czasie.',connection:'Librus jest chwilowo niedostępny.'};
+async function getJSON(file){const response=await fetch('./'+file+'?t='+Date.now(),{cache:'no-store',signal:AbortSignal.timeout(12000)});if(!response.ok)throw new Error('fetch');return response.json();}
+async function refresh(){
+  const [data,state]=await Promise.allSettled([getJSON('plan.json'),getJSON('status.json')]);
+  if(data.status==='fulfilled'&&data.value.schema_version===1&&data.value.days&&typeof data.value.days==='object'&&Number.isFinite(Date.parse(data.value.updated_at))){plan=data.value;}
+  const status=state.status==='fulfilled'?state.value:null;
+  const stamp=plan?Date.parse(plan.updated_at):NaN;
+  const stale=!Number.isFinite(stamp)||Date.now()-stamp>90*60*1000;
+  const checkStale=!status||!Number.isFinite(Date.parse(status.checked_at))||Date.now()-Date.parse(status.checked_at)>90*60*1000;
+  updated.textContent=plan?'Źródło: Librus Synergia · Aktualizacja: '+new Date(stamp).toLocaleString('pl-PL',{dateStyle:'short',timeStyle:'short',timeZone:'Europe/Warsaw'}):'Brak zsynchronizowanego planu';
+  health.className='sub'+(stale||checkStale||status?.ok!==true||data.status==='rejected'?' error':'');
+  health.textContent=status?.ok===false?(messages[status.error]||'Synchronizacja nie powiodła się.')+(plan?' Wyświetlany plan może być nieaktualny.':''):checkStale?'Nie można potwierdzić aktualności synchronizacji.':stale?'Plan nieaktualny — oczekiwanie na synchronizację.':data.status==='rejected'?'Nie udało się odświeżyć danych. Pokazano ostatni pobrany plan.':'Automatyczna synchronizacja co około 30 minut.';
+  if(plan)render();else{nav.replaceChildren();out.replaceChildren(make('div','empty','Plan pojawi się po poprawnym połączeniu z Librusem.'));}
+}
+refresh();
+setInterval(refresh,5*60*1000);
+setInterval(()=>{if(plan)render();},60*1000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 </script>
 </body>
 </html>

@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit
 
 from librus_synergia.client import LibrusSessionData
-from librus_synergia.const import PERSISTED_COOKIE_NAMES, SYNERGIA_PORTAL_LOGIN_URL
+from librus_synergia.const import PERSISTED_COOKIE_NAMES
 from librus_synergia.exceptions import (
     LibrusAccountActionRequiredError, LibrusAuthError, LibrusCaptchaRequiredError,
     LibrusConnectionError,
@@ -40,7 +40,7 @@ def is_login_response(response):
 
 
 async def browser_session(username, password):
-    from playwright.async_api import async_playwright, Error as BrowserError
+    from playwright.async_api import async_playwright, Error as BrowserError, TimeoutError as BrowserTimeoutError
 
     print("Etap: zwykły formularz logowania w Chromium na serwerze.", flush=True)
     try:
@@ -50,13 +50,28 @@ async def browser_session(username, password):
                 context = await browser.new_context(accept_downloads=False, service_workers="block")
                 page = await context.new_page()
                 page.set_default_timeout(12000)
-                await page.goto(SYNERGIA_PORTAL_LOGIN_URL, wait_until="domcontentloaded", timeout=25000)
+                # The current portal is a client-side app: its Synergia link
+                # creates an iframe with layout_version=2. Navigating directly
+                # to the legacy URL returns to the home page in a real browser.
+                await page.goto("https://portal.librus.pl/rodzina", wait_until="domcontentloaded", timeout=25000)
                 target = urlsplit(page.url)
                 allowed = {"api.librus.pl", "synergia.librus.pl", "portal.librus.pl"}
                 origin = target.hostname if target.hostname in allowed else "other"
                 print(f"Chromium: dokument logowania gotowy, host={origin}.", flush=True)
                 if target.scheme != "https" or target.hostname not in allowed:
                     raise LibrusAuthError("Unexpected login origin")
+                try:
+                    advanced = page.get_by_role("button", name="Ustawienia zaawansowane", exact=True)
+                    await advanced.wait_for(state="visible", timeout=6000)
+                except BrowserTimeoutError:
+                    pass
+                else:
+                    await advanced.click()
+                    await page.get_by_role("button", name="Zapisz", exact=True).click()
+                    print("Chromium: wybrano wyłącznie niezbędne cookies portalu.", flush=True)
+                await page.get_by_role("button", name="LIBRUS Synergia", exact=True).click()
+                await page.locator('a[href$="/rodzina/synergia/loguj"]').click()
+                print("Chromium: otwarto szkolny formularz z menu portalu.", flush=True)
                 frame = None
                 deadline = time.monotonic() + 15
                 while frame is None and time.monotonic() < deadline:

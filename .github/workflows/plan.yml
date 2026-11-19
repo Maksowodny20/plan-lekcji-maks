@@ -30,9 +30,8 @@ jobs:
           python-version: '3.12'
       - name: Zainstaluj bibliotekę
         run: python -m pip install --disable-pip-version-check --timeout 30 --retries 2 -r requirements.txt
-      - name: Przygotuj Chromium wyłącznie na serwerze GitHub
-        timeout-minutes: 3
-        run: python -m playwright install --with-deps chromium
+      - name: Sprawdź Chrome dostarczony przez GitHub
+        run: google-chrome --version
       - name: Testy formatu i prywatności
         run: python -m unittest -v
       - name: Pobierz i przygotuj plan

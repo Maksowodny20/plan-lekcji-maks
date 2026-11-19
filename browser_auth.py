@@ -43,16 +43,18 @@ async def browser_session(username, password):
     from playwright.async_api import async_playwright, Error as BrowserError, TimeoutError as BrowserTimeoutError
 
     print("Etap: zwykły formularz logowania w Chromium na serwerze.", flush=True)
+    phase = "start"
     try:
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
             try:
-                context = await browser.new_context(accept_downloads=False, service_workers="block")
+                context = await browser.new_context(accept_downloads=False)
                 page = await context.new_page()
                 page.set_default_timeout(12000)
                 # The current portal is a client-side app: its Synergia link
                 # creates an iframe with layout_version=2. Navigating directly
                 # to the legacy URL returns to the home page in a real browser.
+                phase = "portal_loading"
                 await page.goto("https://portal.librus.pl/rodzina", wait_until="domcontentloaded", timeout=25000)
                 target = urlsplit(page.url)
                 allowed = {"api.librus.pl", "synergia.librus.pl", "portal.librus.pl"}
@@ -60,19 +62,25 @@ async def browser_session(username, password):
                 print(f"Chromium: dokument logowania gotowy, host={origin}.", flush=True)
                 if target.scheme != "https" or target.hostname not in allowed:
                     raise LibrusAuthError("Unexpected login origin")
+                phase = "privacy_options"
                 try:
                     advanced = page.get_by_role("button", name="Ustawienia zaawansowane", exact=True)
-                    await advanced.wait_for(state="visible", timeout=6000)
+                    await advanced.wait_for(state="visible", timeout=12000)
                 except BrowserTimeoutError:
-                    pass
+                    print("Chromium: brak widocznego panelu cookies; przejście do menu.", flush=True)
                 else:
                     await advanced.click()
+                    phase = "privacy_save"
                     await page.get_by_role("button", name="Zapisz", exact=True).click()
                     print("Chromium: wybrano wyłącznie niezbędne cookies portalu.", flush=True)
+                phase = "school_menu"
+                print(f"Chromium: przycisk menu obecny={bool(await page.get_by_role('button', name='LIBRUS Synergia', exact=True).count())}.", flush=True)
                 await page.get_by_role("button", name="LIBRUS Synergia", exact=True).click()
+                phase = "school_link"
                 await page.locator('a[href$="/rodzina/synergia/loguj"]').click()
                 print("Chromium: otwarto szkolny formularz z menu portalu.", flush=True)
                 frame = None
+                phase = "school_frame"
                 deadline = time.monotonic() + 15
                 while frame is None and time.monotonic() < deadline:
                     for candidate in page.frames:
@@ -87,6 +95,7 @@ async def browser_session(username, password):
                     print("Chromium: brak formularza na dozwolonej domenie API.", flush=True)
                     raise LibrusAuthError("No login form on approved origin")
                 print("Chromium: znaleziono formularz na domenie API.", flush=True)
+                phase = "school_form"
                 await frame.locator("#Login").fill(username)
                 await frame.locator("#Pass").fill(password)
                 # A real, visible challenge needs user interaction. Never solve,
@@ -94,6 +103,7 @@ async def browser_session(username, password):
                 for widget in await frame.locator('[data-sitekey], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').all():
                     if await widget.is_visible():
                         raise LibrusCaptchaRequiredError("Interactive challenge required")
+                phase = "form_submit"
                 async with page.expect_response(is_login_response, timeout=20000) as pending:
                     await frame.locator("#LoginBtn").click()
                 response = await pending.value
@@ -109,6 +119,7 @@ async def browser_session(username, password):
                 if status != "ok":
                     raise LibrusAuthError("Login form did not accept sign-in")
                 print("Chromium: formularz przyjął logowanie; oczekiwanie na sesję.", flush=True)
+                phase = "authenticated_session"
                 deadline = time.monotonic() + 35
                 while time.monotonic() < deadline:
                     try:
@@ -122,6 +133,7 @@ async def browser_session(username, password):
                 await browser.close()
     except (LibrusAuthError, LibrusConnectionError):
         raise
-    except BrowserError:
+    except BrowserError as error:
         # Playwright exceptions can contain form values in action call logs.
+        print(f"Chromium: niedokończony etap={phase}, typ={type(error).__name__}.", flush=True)
         raise LibrusConnectionError("Browser sign-in could not finish") from None

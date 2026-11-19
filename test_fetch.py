@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,9 +13,25 @@ from unittest.mock import patch
 import fetch
 from librus_synergia.models import LessonData, OriginalLessonData
 from librus_synergia.exceptions import LibrusCaptchaRequiredError
+from yarl import URL
 
 
 class PublicationTests(unittest.TestCase):
+    def test_auth_diagnostics_do_not_publish_private_response_or_url(self):
+        class Response:
+            url = URL("https://api.librus.pl/OAuth/Authorization?state=PRIVATE_STATE")
+            method = "POST"
+            status = 200
+            headers = {"Content-Type": "application/json"}
+            async def text(self, **kwargs):
+                return json.dumps({"status": "ok", "goTo": "/OAuth/TwoFactorAuthentication?state=PRIVATE_TOKEN", "private": "PRIVATE_PERSON"})
+        output, state = io.StringIO(), {}
+        with redirect_stdout(output):
+            asyncio.run(fetch.diagnose_login_response(SimpleNamespace(cookie_jar=[]), None,
+                SimpleNamespace(response=Response()), auth_state=state))
+        self.assertTrue(state["two_factor_seen"])
+        self.assertNotIn("PRIVATE", output.getvalue())
+
     def test_login_marker_matches_public_browser_protocol(self):
         with patch.object(fetch.time, "time", return_value=1800000000), patch.object(fetch.secrets, "randbelow", return_value=123):
             marker = fetch.login_request_marker()

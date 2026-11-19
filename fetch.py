@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import urlsplit
+from functools import partial
 
 import aiohttp
 from librus_synergia import Librus as BaseLibrus
@@ -19,6 +20,7 @@ from librus_synergia.const import USER_AGENT
 from librus_synergia.exceptions import (
     LibrusAccountActionRequiredError, LibrusAuthError, LibrusCaptchaRequiredError,
     LibrusConnectionError, LibrusInvalidCredentialsError,
+    LibrusUnexpectedResponseError,
 )
 
 TZ = ZoneInfo("Europe/Warsaw")
@@ -177,7 +179,7 @@ async def restore_previous(session):
         pass
 
 
-async def diagnose_login_response(session, context, params):
+async def diagnose_login_response(session, context, params, *, auth_state=None):
     """Only booleans about CAPTCHA detection, never URL paths, bodies or cookies."""
     response = params.response
     if response.url.host not in {"synergia.librus.pl", "api.librus.pl"}:
@@ -191,14 +193,19 @@ async def diagnose_login_response(session, context, params):
             if token in low:
                 return label
         return "other"
-    print(f"OAuth: metoda={response.method}, host={'api' if response.url.host == 'api.librus.pl' else 'synergia'}, trasa={route(response.url.path)}, HTTP={response.status}, przekierowanie={'Location' in response.headers}.", flush=True)
+    api_cookie = any(c['domain'].lstrip('.') == 'api.librus.pl' for c in session.cookie_jar)
+    print(f"OAuth: metoda={response.method}, host={'api' if response.url.host == 'api.librus.pl' else 'synergia'}, trasa={route(response.url.path)}, HTTP={response.status}, przekierowanie={'Location' in response.headers}, cookie_api_obecne={api_cookie}.", flush=True)
     if response.method == "POST" or "json" in response.headers.get("Content-Type", ""):
         try:
             value = json.loads(body)
             if isinstance(value, dict):
                 target = value.get("goTo")
                 target_route = route(urlsplit(target).path) if isinstance(target, str) else "none"
-                print(f"OAuth JSON: goTo_obecne={bool(target)}, trasa_docelowa={target_route}, error_obecne={bool(value.get('error'))}, success_true={value.get('success') is True}.", flush=True)
+                if auth_state is not None and target_route == "two_factor":
+                    auth_state["two_factor_seen"] = True
+                status = value.get("status")
+                status = status if status in ("ok", "error", "actionRequired", "clientRestrictionsFailed") else "other"
+                print(f"OAuth JSON: status={status}, goTo_obecne={bool(target)}, trasa_docelowa={target_route}, error_obecne={bool(value.get('error'))}.", flush=True)
         except ValueError:
             pass
     if "captcha" not in body.casefold():
@@ -216,12 +223,18 @@ async def collect(username, password):
     wanted = {today, today + timedelta(days=1)}
     weeks = sorted({d - timedelta(days=d.weekday()) for d in wanted})
     data = {}
+    auth_state = {"two_factor_seen": False}
     trace = aiohttp.TraceConfig()
-    trace.on_request_end.append(diagnose_login_response)
+    trace.on_request_end.append(partial(diagnose_login_response, auth_state=auth_state))
     async with aiohttp.ClientSession(trace_configs=[trace]) as session, Librus(username, password, session=session, cache_reference_data=True,
                       request_timeout=aiohttp.ClientTimeout(total=20, connect=8)) as librus:
         print("Etap: logowanie do Librusa.", flush=True)
-        await librus.login()
+        try:
+            await librus.login()
+        except LibrusUnexpectedResponseError:
+            if auth_state["two_factor_seen"]:
+                raise LibrusAccountActionRequiredError("Additional verification did not complete") from None
+            raise
         print("Etap: słownik przedmiotów.", flush=True)
         subjects = {str(k): v for k, v in (await librus.subjects()).items()}
         for week in weeks:

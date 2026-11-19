@@ -41,3 +41,7 @@ Ramka działa na opublikowanej stronie; edytor może pokazać placeholder.
 ## Zgodność logowania Librusa
 
 Biblioteka 0.3.33 rozpoznaje CAPTCHA po dowolnym wystąpieniu tego słowa. Zwykła publiczna strona logowania zawiera pusty element `login-limit-exceeded-recaptcha-view` z klasą `d-none`. Lokalna poprawka usuwa z kontroli wyłącznie ten dokładny pusty, ukryty element. Pozostałe znaczniki CAPTCHA oraz wymaganie poprawnej sesji nadal są sprawdzane. Nie jest używana zewnętrzna usługa rozwiązywania CAPTCHA.
+
+### Stan autoryzacji po usunięciu fałszywego alarmu
+
+Serwer logowania zwraca przekierowanie do etapu TwoFactorAuthentication, po którym sesja nie zostaje utworzona. Ten stan jest teraz raportowany jako dodatkowa weryfikacja konta (`account`), a nie CAPTCHA. Nie wyłączamy 2FA i nie korzystamy z płatnych solverów. Żądanie uwzględnia metadane bieżącego publicznego formularza Authorization.js.

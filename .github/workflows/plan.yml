@@ -6,7 +6,7 @@ on:
     branches: [main]
   schedule:
     # UTC; automatyczne odświeżanie co ok. 30 min, z możliwym opóźnieniem Actions
-    - cron: '7,37 5-20 * * *'
+    - cron: '7,37 * * * *'
 
 permissions:
   contents: read
@@ -18,30 +18,46 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - name: Pobierz pliki
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Ustaw Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Zainstaluj bibliotekę
-        run: python -m pip install 'librus-synergia==0.3.25'
+        run: python -m pip install --disable-pip-version-check --timeout 30 --retries 2 -r requirements.txt
+      - name: Testy formatu i prywatności
+        run: python -m unittest -v
       - name: Pobierz i przygotuj plan
+        id: sync
+        continue-on-error: true
+        timeout-minutes: 3
         env:
           LIBRUS_LOGIN: ${{ secrets.LIBRUS_LOGIN }}
           LIBRUS_PASSWORD: ${{ secrets.LIBRUS_PASSWORD }}
-          SHOW_ROOMS: 'false'
         run: python fetch.py
       - name: Skonfiguruj GitHub Pages
         uses: actions/configure-pages@v5
+      - name: Wybierz wyłącznie pliki publiczne
+        run: |
+          mkdir public
+          cp site/index.html site/status.json public/
+          if [ -f site/plan.json ]; then cp site/plan.json public/; fi
+          touch public/.nojekyll
       - name: Przygotuj stronę do publikacji
         uses: actions/upload-pages-artifact@v4
         with:
-          path: site
+          path: public
+    outputs:
+      sync_result: ${{ steps.sync.outcome }}
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pages: write
       id-token: write
@@ -52,3 +68,8 @@ jobs:
       - name: Opublikuj stronę
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Zgłoś wynik synchronizacji
+        if: needs.build.outputs.sync_result != 'success'
+        run: |
+          echo '::error::Synchronizacja Librusa nieudana. Strona opublikowana ze stanem błędu i ostatnim poprawnym planem, jeśli istnieje.'
+          exit 1

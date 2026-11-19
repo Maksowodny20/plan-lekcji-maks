@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+*.session.json
+session.json
+site/plan.json

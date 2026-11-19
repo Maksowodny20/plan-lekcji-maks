@@ -15,6 +15,14 @@ from librus_synergia.exceptions import LibrusCaptchaRequiredError
 
 
 class PublicationTests(unittest.TestCase):
+    def test_login_marker_matches_public_browser_protocol(self):
+        with patch.object(fetch.time, "time", return_value=1800000000), patch.object(fetch.secrets, "randbelow", return_value=123):
+            marker = fetch.login_request_marker()
+        decode = lambda value: "".join(chr(ord(c) - 20) for c in value)
+        random_part, stamp = marker.split("_")
+        self.assertEqual(decode(random_part), "0.000000000000123")
+        self.assertEqual(decode(stamp), "1800000000000")
+
     def test_empty_hidden_captcha_placeholder_is_not_a_challenge(self):
         fetch.check_captcha('<input type="password"><div id="login-limit-exceeded-recaptcha-view" class="d-none"></div>', "fixture")
         fetch.check_captcha('<button onclick="loginLimitExceededReCaptchaView()">Back</button><div class="d-none" id="login-limit-exceeded-recaptcha-view"></div>', "fixture")

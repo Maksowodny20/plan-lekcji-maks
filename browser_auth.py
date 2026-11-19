@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit, urljoin
 
 from librus_synergia.client import LibrusSessionData
-from librus_synergia.const import PERSISTED_COOKIE_NAMES, SYNERGIA_PORTAL_LOGIN_URL
+from librus_synergia.const import PERSISTED_COOKIE_NAMES, SYNERGIA_PORTAL_LOGIN_URL, USER_AGENT
 from librus_synergia.exceptions import (
     LibrusAccountActionRequiredError, LibrusAuthError, LibrusCaptchaRequiredError,
     LibrusConnectionError,
@@ -58,7 +58,7 @@ async def browser_session(username, password):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(channel="chrome", headless=True)
             try:
-                context = await browser.new_context(accept_downloads=False)
+                context = await browser.new_context(accept_downloads=False, user_agent=USER_AGENT)
                 page = await context.new_page()
                 page.set_default_timeout(12000)
                 # Bootstrap the documented OAuth entry point as an API request.

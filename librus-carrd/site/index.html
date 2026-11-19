@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Plan lekcji</title>
+<style>
+:root { color-scheme:dark; --bg:#10151e; --panel:#1a2330; --ink:#ecf3fc; --muted:#a7b8c8; --stroke:#334153; --accent:#79c6f5; --red:#ffb0ae; --yellow:#ffd890; }
+* {box-sizing:border-box} body{margin:0;background:transparent;color:var(--ink);font:15px/1.48 system-ui,Segoe UI,Arial,sans-serif}
+#app{max-width:680px;margin:0 auto;padding:7px} .frame{background:var(--bg);border:1px solid var(--stroke);border-radius:18px;padding:18px}
+h1{font-size:24px;line-height:1.2;margin:0 0 3px;font-weight:750} .sub{color:var(--muted);font-size:12px;margin:0 0 15px}
+nav{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap} button{border:1px solid var(--stroke);padding:8px 13px;border-radius:11px;background:var(--panel);color:var(--ink);font:inherit;font-weight:650;cursor:pointer}
+button[aria-pressed="true"]{background:var(--accent);color:#0c1b2c;border-color:var(--accent)}
+.dayhead{font-size:14px;color:var(--accent);font-weight:700;margin:15px 0 8px;text-transform:capitalize}
+.lesson{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;margin:7px 0;padding:11px;background:var(--panel);border-radius:12px;border:1px solid var(--stroke)}
+.number{font-size:19px;font-weight:800;color:var(--accent);text-align:center} .name{font-weight:700;overflow-wrap:anywhere} .times{color:var(--muted);font-size:12px}
+.room{color:var(--muted);font-size:12px;white-space:nowrap} .status{display:inline-block;margin-top:5px;padding:2px 7px;background:#3e3130;border-radius:7px;color:var(--red);font-size:11px;font-weight:800}
+.status.substitute{color:var(--yellow);background:#413926} .lesson.cancelled .name{text-decoration:line-through;color:var(--muted)}
+.empty{border:1px dashed var(--stroke);border-radius:12px;padding:26px 14px;text-align:center;color:var(--muted)} .error{color:var(--red)}
+@media(max-width:480px){.frame{padding:13px}.lesson{grid-template-columns:30px 1fr;gap:8px}.room{grid-column:2;justify-self:start}.number{font-size:16px}h1{font-size:21px}}
+</style>
+</head>
+<body><div id="app"><div class="frame"><h1>Plan lekcji</h1><p id="updated" class="sub">Wczytywanie…</p><nav id="nav" aria-label="Wybierz zakres planu"></nav><div id="lessons" aria-live="polite">Pobieranie planu…</div></div></div>
+<script>
+const nav=document.getElementById('nav'), out=document.getElementById('lessons'), updated=document.getElementById('updated');
+const dayNames=['niedziela','poniedziałek','wtorek','środa','czwartek','piątek','sobota'];
+let plan=null, view='today';
+function warsawToday(){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Warsaw',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));return `${p.year}-${p.month}-${p.day}`;}
+function shiftDate(day,n){const d=new Date(day+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
+function titleFor(day){const date=new Date(day+'T12:00:00Z');return dayNames[date.getUTCDay()]+', '+date.toLocaleDateString('pl-PL',{day:'numeric',month:'long',timeZone:'UTC'});}
+function make(tag,cls,txt){const x=document.createElement(tag);if(cls)x.className=cls;if(txt!==undefined)x.textContent=txt;return x;}
+function render(){
+  if(!plan)return;nav.replaceChildren();out.replaceChildren();
+  for(const [key,label] of [['today','Dzisiaj'],['tomorrow','Jutro'],['week','7 dni']]){const btn=make('button','',label);btn.type='button';btn.setAttribute('aria-pressed',String(view===key));btn.addEventListener('click',()=>{view=key;render()});nav.append(btn);}
+  const today=warsawToday(); const dates=view==='today'?[today]:view==='tomorrow'?[shiftDate(today,1)]:Array.from({length:7},(_,i)=>shiftDate(today,i));
+  for(const day of dates){
+    out.append(make('div','dayhead',titleFor(day)));
+    const lessons=plan.days?.[day];
+    if(!lessons){out.append(make('div','empty','Brak opublikowanych danych na ten dzień.'));continue;}
+    if(!lessons.length){out.append(make('div','empty','Brak lekcji.'));continue;}
+    for(const lesson of lessons){
+      const wrap=make('div','lesson'+(lesson.cancelled?' cancelled':''));
+      wrap.append(make('div','number',lesson.number==null?'•':String(lesson.number)));
+      const meta=make('div','');meta.append(make('div','name',lesson.subject||'Nieznany przedmiot'));
+      const time=[lesson.start,lesson.end].filter(Boolean).join('–');if(time)meta.append(make('div','times',time));
+      if(lesson.cancelled)meta.append(make('span','status','Odwołana'));
+      else if(lesson.substitution)meta.append(make('span','status substitute','Zastępstwo'+(lesson.original_subject?' (za: '+lesson.original_subject+')':'')));
+      wrap.append(meta);
+      if(lesson.room)wrap.append(make('div','room','Sala '+lesson.room));
+      out.append(wrap);
+    }
+  }
+}
+(async()=>{try{const response=await fetch('./plan.json?d='+Date.now(),{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const value=await response.json();if(!value.days||typeof value.days!=='object')throw new Error('Niepoprawne dane');plan=value;updated.textContent='Źródło: Librus Synergia · Ostatnia aktualizacja: '+new Date(value.updated_at).toLocaleString('pl-PL',{dateStyle:'short',timeStyle:'short',timeZone:'Europe/Warsaw'});render();}catch(err){updated.textContent='Brak aktualnych danych';out.replaceChildren(make('div','empty error','Nie udało się pobrać planu. Sprawdź konfigurację synchronizacji.'));}})();
+</script>
+</body>
+</html>

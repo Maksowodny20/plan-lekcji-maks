@@ -85,7 +85,7 @@ class Librus(BaseLibrus):
         # /OAuth/js/Authorization.js, including a fresh timestamp on sign-in.
         # This carries no password/session data and does not solve a challenge.
         self.client._session.headers["X-Baner"] = login_request_marker()
-        self.client._session.headers["User-Agent"] = USER_AGENT
+        self.client._session.headers.setdefault("User-Agent", USER_AGENT)
         return await super().login(force=force)
 
 
@@ -218,42 +218,59 @@ async def diagnose_login_response(session, context, params, *, auth_state=None):
     print(f"Diagnostyka CAPTCHA: HTTP={response.status}, odniesienie={active}, widget={widget}, formularz_hasla={password_field}, pusty_placeholder={'login-limit-exceeded-recaptcha-view' in body}, cookie_sesji_obecne={has_session}.", flush=True)
 
 
-async def collect(username, password):
+async def fetch_public_plan(librus):
     today = datetime.now(TZ).date()
     wanted = {today, today + timedelta(days=1)}
     weeks = sorted({d - timedelta(days=d.weekday()) for d in wanted})
     data = {}
-    auth_state = {"two_factor_seen": False}
-    trace = aiohttp.TraceConfig()
-    trace.on_request_end.append(partial(diagnose_login_response, auth_state=auth_state))
-    async with aiohttp.ClientSession(trace_configs=[trace]) as session, Librus(username, password, session=session, cache_reference_data=True,
-                      request_timeout=aiohttp.ClientTimeout(total=20, connect=8)) as librus:
-        print("Etap: logowanie do Librusa.", flush=True)
-        try:
-            await librus.login()
-        except LibrusUnexpectedResponseError:
-            if auth_state["two_factor_seen"]:
-                raise LibrusAccountActionRequiredError("Additional verification did not complete") from None
-            raise
-        print("Etap: słownik przedmiotów.", flush=True)
-        subjects = {str(k): v for k, v in (await librus.subjects()).items()}
-        for week in weeks:
-            print("Etap: pobieranie tygodnia planu.", flush=True)
-            fetched = await librus.timetable(week)
-            for day, entries in fetched.items():
-                if day in wanted:
-                    data[day.isoformat()] = sorted(
-                        (public_lesson(lesson, subjects) for lesson in entries),
-                        key=lambda row: (row["start"], row["number"] if row["number"] is not None else 99))
-            # Omitted weekend days are empty only for a published week.
-            if fetched:
-                for day in wanted:
-                    if day.weekday() >= 5 and week <= day <= week + timedelta(days=6):
-                        data.setdefault(day.isoformat(), [])
+    print("Etap: słownik przedmiotów.", flush=True)
+    subjects = {str(k): v for k, v in (await librus.subjects()).items()}
+    for week in weeks:
+        print("Etap: pobieranie tygodnia planu.", flush=True)
+        fetched = await librus.timetable(week)
+        for day, entries in fetched.items():
+            if day in wanted:
+                data[day.isoformat()] = sorted(
+                    (public_lesson(lesson, subjects) for lesson in entries),
+                    key=lambda row: (row["start"], row["number"] if row["number"] is not None else 99))
+        # Omitted weekend days are empty only for a published week.
+        if fetched:
+            for day in wanted:
+                if day.weekday() >= 5 and week <= day <= week + timedelta(days=6):
+                    data.setdefault(day.isoformat(), [])
     payload = {"schema_version": 1, "updated_at": datetime.now(TZ).isoformat(timespec="seconds"),
                "timezone": "Europe/Warsaw", "days": data}
     validate_payload(payload)
     return payload
+
+
+async def collect(username, password):
+    auth_state = {"two_factor_seen": False}
+    trace = aiohttp.TraceConfig()
+    trace.on_request_end.append(partial(diagnose_login_response, auth_state=auth_state))
+    timeout = aiohttp.ClientTimeout(total=20, connect=8)
+    async with aiohttp.ClientSession(trace_configs=[trace]) as session, Librus(
+            username, password, session=session, cache_reference_data=True,
+            request_timeout=timeout) as librus:
+        print("Etap: logowanie do Librusa.", flush=True)
+        try:
+            await librus.login()
+        except LibrusUnexpectedResponseError:
+            if not auth_state["two_factor_seen"]:
+                raise
+            if os.environ.get("ENABLE_BROWSER_LOGIN") != "true":
+                raise LibrusAccountActionRequiredError("Additional verification did not complete") from None
+        else:
+            return await fetch_public_plan(librus)
+    # A fresh normal browser handles the site's JavaScript and cookie sequence.
+    # The failed HTTP session is closed before opening it; no repeated retries.
+    from browser_auth import browser_session
+    session_data, user_agent = await browser_session(username, password)
+    async with aiohttp.ClientSession(headers={"User-Agent": user_agent}) as session, Librus(
+            username, password, session=session, session_data=session_data,
+            cache_reference_data=True, request_timeout=timeout) as librus:
+        await librus.login()
+        return await fetch_public_plan(librus)
 
 
 async def main():

@@ -7,3 +7,6 @@ site/plan.json
 site/status.json
 site/*.tmp
 .venv/
+playwright/.auth/
+test-results/
+playwright-report/

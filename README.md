@@ -45,3 +45,11 @@ Biblioteka 0.3.33 rozpoznaje CAPTCHA po dowolnym wystąpieniu tego słowa. Zwyk�
 ### Stan autoryzacji po usunięciu fałszywego alarmu
 
 Serwer logowania zwraca przekierowanie do etapu TwoFactorAuthentication, po którym sesja nie zostaje utworzona. Ten stan jest teraz raportowany jako dodatkowa weryfikacja konta (`account`), a nie CAPTCHA. Nie wyłączamy 2FA i nie korzystamy z płatnych solverów. Żądanie uwzględnia metadane bieżącego publicznego formularza Authorization.js.
+
+## Logowanie formularzem w Chromium na serwerze
+
+Jeżeli uproszczone logowanie HTTP nie ukończy przekierowań, workflow może użyć zwykłego formularza w Chromium przez oficjalny Playwright Microsoftu (`playwright==1.65.2`, PyPI). Chromium i jego zależności są instalowane wyłącznie na jednorazowym runnerze GitHub (Ubuntu 24.04). Nie ma instalacji w Windowsie użytkownika, rozszerzeń ani płatnych usług.
+
+Przeglądarka działa w ulotnym kontekście. Nie tworzymy śladów, zrzutów ekranu, nagrań ani plików storage_state. Tylko dozwolone cookies Librusa są przekazywane w pamięci do biblioteki API. Cały profil jest zamykany po próbie. Widoczna CAPTCHA lub wymagane działanie na koncie kończy próbę; skrypt nie rozwiązuje wyzwań ani nie zmienia ustawień zabezpieczeń. Odpowiedzi i treść błędów Playwrighta nie są logowane, ponieważ mogą zawierać dane formularza.
+
+Przełącznik w workflow: ENABLE_BROWSER_LOGIN=true. Moduł browser_auth.py nie importuje Playwrighta do wykonania zwykłych testów prywatności.

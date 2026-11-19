@@ -26,7 +26,9 @@ def clean_time(value):
 
 async def main():
     username = os.environ.get("LIBRUS_LOGIN")
-    password = os.environ.get("LIBRUS_PASSWORD")
+    password = os.environ.get("LIBRUS_PASSWORD")    
+    print("Login dostępny:", bool(username))
+    print("Hasło dostępne:", bool(password))
     if not username or not password:
         raise RuntimeError("Skonfiguruj sekrety LIBRUS_LOGIN i LIBRUS_PASSWORD")
 

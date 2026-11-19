@@ -52,23 +52,43 @@ async def browser_session(username, password):
                 page.set_default_timeout(12000)
                 await page.goto(SYNERGIA_PORTAL_LOGIN_URL, wait_until="domcontentloaded", timeout=25000)
                 target = urlsplit(page.url)
-                if target.scheme != "https" or target.hostname != "api.librus.pl":
+                allowed = {"api.librus.pl", "synergia.librus.pl", "portal.librus.pl"}
+                origin = target.hostname if target.hostname in allowed else "other"
+                print(f"Chromium: dokument logowania gotowy, host={origin}.", flush=True)
+                if target.scheme != "https" or target.hostname not in allowed:
                     raise LibrusAuthError("Unexpected login origin")
-                await page.locator("#Login").fill(username)
-                await page.locator("#Pass").fill(password)
+                frame = None
+                deadline = time.monotonic() + 15
+                while frame is None and time.monotonic() < deadline:
+                    for candidate in page.frames:
+                        location = urlsplit(candidate.url)
+                        if location.scheme == "https" and location.hostname == "api.librus.pl":
+                            if await candidate.locator("#Login").count():
+                                frame = candidate
+                                break
+                    if frame is None:
+                        await asyncio.sleep(0.5)
+                if frame is None:
+                    print("Chromium: brak formularza na dozwolonej domenie API.", flush=True)
+                    raise LibrusAuthError("No login form on approved origin")
+                print("Chromium: znaleziono formularz na domenie API.", flush=True)
+                await frame.locator("#Login").fill(username)
+                await frame.locator("#Pass").fill(password)
                 # A real, visible challenge needs user interaction. Never solve,
                 # suppress or bypass it. The hidden empty placeholder is inert.
-                for widget in await page.locator('[data-sitekey], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').all():
+                for widget in await frame.locator('[data-sitekey], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').all():
                     if await widget.is_visible():
                         raise LibrusCaptchaRequiredError("Interactive challenge required")
                 async with page.expect_response(is_login_response, timeout=20000) as pending:
-                    await page.locator("#LoginBtn").click()
+                    await frame.locator("#LoginBtn").click()
                 response = await pending.value
                 try:
                     result = await response.json()
                 except ValueError:
                     raise LibrusAuthError("Unexpected form response") from None
                 status = result.get("status") if isinstance(result, dict) else None
+                safe_status = status if status in ("ok", "error", "actionRequired", "clientRestrictionsFailed") else "other"
+                print(f"Chromium: odpowiedź formularza HTTP={response.status}, status={safe_status}.", flush=True)
                 if status == "actionRequired":
                     raise LibrusAccountActionRequiredError("Account action required")
                 if status != "ok":

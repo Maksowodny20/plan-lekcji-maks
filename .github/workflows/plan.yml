@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 6
     steps:
       - name: Pobierz pliki
@@ -30,6 +30,9 @@ jobs:
           python-version: '3.12'
       - name: Zainstaluj bibliotekę
         run: python -m pip install --disable-pip-version-check --timeout 30 --retries 2 -r requirements.txt
+      - name: Przygotuj Chromium wyłącznie na serwerze GitHub
+        timeout-minutes: 3
+        run: python -m playwright install --with-deps chromium
       - name: Testy formatu i prywatności
         run: python -m unittest -v
       - name: Pobierz i przygotuj plan
@@ -39,6 +42,7 @@ jobs:
         env:
           LIBRUS_LOGIN: ${{ secrets.LIBRUS_LOGIN }}
           LIBRUS_PASSWORD: ${{ secrets.LIBRUS_PASSWORD }}
+          ENABLE_BROWSER_LOGIN: 'true'
         run: python fetch.py
       - name: Skonfiguruj GitHub Pages
         uses: actions/configure-pages@v5

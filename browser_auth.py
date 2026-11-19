@@ -61,29 +61,29 @@ async def browser_session(username, password):
                 context = await browser.new_context(accept_downloads=False, user_agent=USER_AGENT)
                 page = await context.new_page()
                 page.set_default_timeout(12000)
-                # Bootstrap the documented OAuth entry point as an API request.
-                # context.request shares cookies with the real Chrome page.
-                # This avoids the unrelated portal home-page SPA redirect.
-                phase = "oauth_bootstrap"
-                bootstrap_url = SYNERGIA_PORTAL_LOGIN_URL + "?layout_version=2"
-                bootstrap = await context.request.get(bootstrap_url,
-                    max_redirects=0, timeout=20000)
-                print(f"Chrome: inicjalizacja OAuth HTTP={bootstrap.status}.", flush=True)
-                location = bootstrap.headers.get("location")
-                if not location:
-                    raise LibrusConnectionError("OAuth entry point did not redirect")
-                authorization_url = urljoin(SYNERGIA_PORTAL_LOGIN_URL, location)
-                if not is_authorization_url(authorization_url):
-                    raise LibrusAuthError("Unexpected OAuth destination")
-                await bootstrap.dispose()
-                phase = "authorization_page"
-                response = await page.goto(authorization_url, wait_until="domcontentloaded", timeout=25000)
+                # The public portal embeds this exact layout_version=2 entry
+                # point. Top-level navigation is redirected back to the portal.
+                # Use the same trusted-origin iframe without depending on the
+                # unrelated news/advertising SPA; browser CSP/TLS stay enabled.
+                phase = "portal_document"
+                response = await page.goto("https://portal.librus.pl/rodzina", wait_until="domcontentloaded", timeout=25000)
                 target = urlsplit(page.url)
-                allowed = {"api.librus.pl", "synergia.librus.pl"}
+                allowed = {"portal.librus.pl"}
                 origin = target.hostname if target.hostname in allowed else "other"
                 print(f"Chromium: dokument logowania gotowy, host={origin}, HTTP={response.status if response else 0}.", flush=True)
                 if target.scheme != "https" or target.hostname not in allowed:
                     raise LibrusAuthError("Unexpected login origin")
+                if response is None or response.status != 200:
+                    raise LibrusConnectionError("Portal unavailable")
+                title = (await page.title()).casefold()
+                if any(marker in title for marker in ("just a moment", "access denied", "attention required")):
+                    raise LibrusCaptchaRequiredError("Portal verification required")
+                for widget in await page.locator('[data-sitekey], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').all():
+                    if await widget.is_visible():
+                        raise LibrusCaptchaRequiredError("Portal challenge required")
+                phase = "official_iframe"
+                await page.set_content('<!doctype html><html lang="pl"><head><meta charset="utf-8"></head><body><iframe title="Logowanie Synergia" src="https://synergia.librus.pl/loguj/portalRodzina?layout_version=2" style="width:100%;height:900px;border:0"></iframe></body></html>', wait_until="domcontentloaded", timeout=20000)
+                print("Chrome: załadowano oficjalną ramkę logowania layout_version=2.", flush=True)
                 frame = None
                 phase = "school_frame"
                 deadline = time.monotonic() + 15

@@ -15,6 +15,22 @@ from librus_synergia.exceptions import LibrusCaptchaRequiredError
 
 
 class PublicationTests(unittest.TestCase):
+    def test_empty_hidden_captcha_placeholder_is_not_a_challenge(self):
+        fetch.check_captcha('<input type="password"><div id="login-limit-exceeded-recaptcha-view" class="d-none"></div>', "fixture")
+        fetch.check_captcha('<button onclick="loginLimitExceededReCaptchaView()">Back</button><div class="d-none" id="login-limit-exceeded-recaptcha-view"></div>', "fixture")
+
+    def test_real_or_unknown_captcha_is_still_rejected(self):
+        for html in (
+            '<div id="login-limit-exceeded-recaptcha-view"></div>',
+            '<div id="login-limit-exceeded-recaptcha-view" class="d-none"><iframe src="recaptcha"></iframe></div>',
+            '<div class="g-recaptcha" data-sitekey="public"></div>',
+            '{"error":"captcha_required"}',
+            '<div class="d-none" id="some-other-captcha"></div>',
+            '<button onclick="captchaRequired()"></button>',
+        ):
+            with self.assertRaises(LibrusCaptchaRequiredError):
+                fetch.check_captcha(html, "fixture")
+
     def lesson(self, **changes):
         args = dict(lesson_no=0, hour_from="08:00:00", hour_to="08:45:00",
                     subject_id=7, teacher_id="PRIVATE_TEACHER", classroom_id="PRIVATE_ROOM",

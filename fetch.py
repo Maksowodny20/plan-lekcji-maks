@@ -8,9 +8,11 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 
 import aiohttp
-from librus_synergia import Librus
+from librus_synergia import Librus as BaseLibrus
+from librus_synergia.client import LibrusApiClient
 from librus_synergia.exceptions import (
     LibrusAccountActionRequiredError, LibrusAuthError, LibrusCaptchaRequiredError,
     LibrusConnectionError, LibrusInvalidCredentialsError,
@@ -43,6 +45,35 @@ ERRORS = {
     "invalid_data": "Nieoczekiwany format planu. Wstrzymano publikację danych.",
     "unexpected": "Synchronizacja nie powiodła się. Sprawdź etap w Actions.",
 }
+
+# Librus's ordinary login HTML includes this EMPTY, hidden placeholder even
+# when no challenge exists. 0.3.33 mistakes any occurrence of "captcha" for a
+# challenge. Remove only this exact inert element; retain the original detector
+# for everything else, and keep the library's mandatory session-cookie check.
+EMPTY_CAPTCHA_PLACEHOLDER = re.compile(
+    r"<div\b(?=[^>]*\bid=[\"']login-limit-exceeded-recaptcha-view[\"'])"
+    r"(?=[^>]*\bclass=[\"'][^\"']*\bd-none\b[^\"']*[\"'])[^>]*>\s*</div\s*>",
+    re.I,
+)
+
+
+def check_captcha(text, where):
+    cleaned, count = EMPTY_CAPTCHA_PLACEHOLDER.subn("", text)
+    if count:
+        # A static button handler references that same hidden view. It is not
+        # evidence that the server asked for a challenge. Do not remove any
+        # other handlers, visible widgets or JSON error codes.
+        cleaned = re.sub(r"\bonclick\s*=\s*([\"'])\s*loginLimitExceededReCaptchaView\(\);?\s*\1", "", cleaned)
+        print("Zgodność Librus: pominięto pusty ukryty placeholder CAPTCHA.", flush=True)
+    LibrusApiClient._raise_if_captcha(cleaned, where)
+
+
+class Librus(BaseLibrus):
+    @property
+    def client(self):
+        client = super().client
+        client._raise_if_captcha = check_captcha
+        return client
 
 
 def subject_name(value):
@@ -134,15 +165,33 @@ async def diagnose_login_response(session, context, params):
     response = params.response
     if response.url.host not in {"synergia.librus.pl", "api.librus.pl"}:
         return
-    if "html" not in response.headers.get("Content-Type", ""):
+    if not any(word in response.url.path.lower() for word in ("oauth", "loguj")):
         return
     body = await response.text(errors="replace")
+    def route(path):
+        low = path.lower()
+        for token, label in (("captcha", "captcha"), ("twofactor", "two_factor"), ("2fa", "two_factor"), ("authorization", "authorization"), ("portalrodzina", "portal_start"), ("loguj", "login"), ("select", "selection"), ("consent", "consent")):
+            if token in low:
+                return label
+        return "other"
+    print(f"OAuth: metoda={response.method}, host={'api' if response.url.host == 'api.librus.pl' else 'synergia'}, trasa={route(response.url.path)}, HTTP={response.status}, przekierowanie={'Location' in response.headers}.", flush=True)
+    if response.method == "POST" or "json" in response.headers.get("Content-Type", ""):
+        try:
+            value = json.loads(body)
+            if isinstance(value, dict):
+                target = value.get("goTo")
+                target_route = route(urlsplit(target).path) if isinstance(target, str) else "none"
+                print(f"OAuth JSON: goTo_obecne={bool(target)}, trasa_docelowa={target_route}, error_obecne={bool(value.get('error'))}, success_true={value.get('success') is True}.", flush=True)
+        except ValueError:
+            pass
     if "captcha" not in body.casefold():
         return
     without_scripts = re.sub(r"<script\b[^>]*>.*?</script>", "", body, flags=re.I | re.S)
     active = bool(re.search(r"<(?:div|iframe|input|form)\b[^>]*(?:g-recaptcha|h-captcha|recaptcha|captcha)", without_scripts, re.I))
     has_session = any(cookie.key == "oauth_token" for cookie in session.cookie_jar)
-    print(f"Diagnostyka CAPTCHA: HTTP={response.status}, element_wyzwania={active}, znacznik_poza_skryptami={'captcha' in without_scripts.casefold()}, cookie_sesji_obecne={has_session}.", flush=True)
+    widget = bool(re.search(r"<(?:div|iframe)\b[^>]*(?:data-sitekey|(?:src=[\"\'][^\"\']*(?:recaptcha|hcaptcha)))", without_scripts, re.I))
+    password_field = bool(re.search(r"<input\b[^>]*type=[\"\']password[\"\']", without_scripts, re.I))
+    print(f"Diagnostyka CAPTCHA: HTTP={response.status}, odniesienie={active}, widget={widget}, formularz_hasla={password_field}, pusty_placeholder={'login-limit-exceeded-recaptcha-view' in body}, cookie_sesji_obecne={has_session}.", flush=True)
 
 
 async def collect(username, password):

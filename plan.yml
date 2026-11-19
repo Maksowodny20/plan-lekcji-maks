@@ -1,0 +1,54 @@
+name: Odśwież plan z Librusa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    # UTC; automatyczne odświeżanie co ok. 30 min, z możliwym opóźnieniem Actions
+    - cron: '7,37 5-20 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pobierz pliki
+        uses: actions/checkout@v4
+      - name: Ustaw Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Zainstaluj bibliotekę
+        run: python -m pip install 'librus-synergia==0.3.25'
+      - name: Pobierz i przygotuj plan
+        env:
+          LIBRUS_LOGIN: ${{ secrets.LIBRUS_LOGIN }}
+          LIBRUS_PASSWORD: ${{ secrets.LIBRUS_PASSWORD }}
+          SHOW_ROOMS: 'false'
+        run: python fetch.py
+      - name: Skonfiguruj GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Przygotuj stronę do publikacji
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Opublikuj stronę
+        id: deployment
+        uses: actions/deploy-pages@v4

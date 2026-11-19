@@ -65,7 +65,8 @@ async def browser_session(username, password):
                 # context.request shares cookies with the real Chrome page.
                 # This avoids the unrelated portal home-page SPA redirect.
                 phase = "oauth_bootstrap"
-                bootstrap = await context.request.get(SYNERGIA_PORTAL_LOGIN_URL,
+                bootstrap_url = SYNERGIA_PORTAL_LOGIN_URL + "?layout_version=2"
+                bootstrap = await context.request.get(bootstrap_url,
                     max_redirects=0, timeout=20000)
                 print(f"Chrome: inicjalizacja OAuth HTTP={bootstrap.status}.", flush=True)
                 location = bootstrap.headers.get("location")
@@ -96,7 +97,9 @@ async def browser_session(username, password):
                     if frame is None:
                         await asyncio.sleep(0.5)
                 if frame is None:
-                    print("Chromium: brak formularza na dozwolonej domenie API.", flush=True)
+                    current = urlsplit(page.url).hostname
+                    current = current if current in {"api.librus.pl", "synergia.librus.pl", "portal.librus.pl"} else "other"
+                    print(f"Chromium: brak formularza na dozwolonej domenie API, aktualny_host={current}.", flush=True)
                     raise LibrusAuthError("No login form on approved origin")
                 print("Chromium: znaleziono formularz na domenie API.", flush=True)
                 phase = "school_form"
